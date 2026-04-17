@@ -75,7 +75,7 @@ def to_excel_formatted_multi(sheets_dict):
 with st.sidebar:
     st.image("https://thesleepcompany.in/cdn/shop/files/Logo_White_300x.png?v=1614330134", width=200)
     st.header("Department Portal")
-    app_mode = st.radio("Choose App", ["Sales Performance", "Pre-Sales Break and SLA"])
+    app_mode = st.radio("Choose App", ["Sales Performance", "Pre-Sales SLA & Breaks"])
     st.divider()
 
 # ==========================================
@@ -105,7 +105,8 @@ if app_mode == "Sales Performance":
 
             map_cols = {'Total Staffed Duration': 'Staffed','Total Ready Duration': 'Ready','Total Break Duration': 'Breaks','Total Idle Time': 'Idle','Total Talk Time in Interval': 'Talk','Total ACW Duration in Interval': 'ACW'}
             for k, v in map_cols.items(): 
-                prod[v+'_sec'] = prod[k].apply(hms_to_sec) if k in prod.columns else 0
+                if k in prod.columns: prod[v+'_sec'] = prod[k].apply(hms_to_sec)
+                else: prod[v+'_sec'] = 0
 
             pf = prod.groupby(['Date', 'User ID', 'User Name']).agg({f"{n}_sec": "sum" for n in map_cols.values()}).reset_index()
             res = pd.merge(pf, sf, on=['Date', 'User ID'], how='left').fillna(0)
@@ -116,12 +117,11 @@ if app_mode == "Sales Performance":
             final_sales = res[['Date', 'User Name', 'User ID', 'Staffed', 'Ready', 'Breaks', 'Idle', 'Talk', 'ACW', 'T_OB', 'C_OB', 'U_OB', 'U_CC']]
             final_sales.columns = ['Date', 'Agent Name', 'Email', 'Staffed', 'Ready', 'Breaks', 'Idle', 'Talk', 'ACW', 'Total Calls', 'Connected', 'Unique OB', 'Unique CC']
             
-            # Grand Total Row
             s_totals = pd.DataFrame([{'Date': 'Grand Total', 'Agent Name': '-', 'Email': '-', 'Staffed': '-', 'Ready': '-', 'Breaks': '-', 'Idle': '-', 'Talk': '-', 'ACW': '-', 'Total Calls': int(final_sales['Total Calls'].sum()), 'Connected': int(final_sales['Connected'].sum()), 'Unique OB': int(final_sales['Unique OB'].sum()), 'Unique CC': int(final_sales['Unique CC'].sum())}])
-            final_sales_total = pd.concat([final_sales, s_totals], ignore_index=True)
+            final_sales_with_total = pd.concat([final_sales, s_totals], ignore_index=True)
 
-            st.dataframe(final_sales_total, use_container_width=True)
-            sheets = {'Sales_Report': {'df': final_sales_total, 'title': 'Sales Team Performance Report', 'has_summary': True}}
+            st.dataframe(final_sales_with_total, use_container_width=True)
+            sheets = {'Sales_Report': {'df': final_sales_with_total, 'title': 'Sales Performance Report', 'has_summary': True}}
             xl = to_excel_formatted_multi(sheets)
             st.download_button("📥 Download Sales Excel", data=xl, file_name="Sales_Performance.xlsx")
         except Exception as e: st.error(f"Error: {e}")
@@ -129,13 +129,13 @@ if app_mode == "Sales Performance":
 # ==========================================
 # 2. PRE-SALES SECTION
 # ==========================================
-elif app_mode == "Pre-Sales Break and SLA":
-    st.title("📞 Pre-Sales Performance Hub")
+elif app_mode == "Pre-Sales SLA & Breaks":
+    st.title("📞 Pre-Sales SLA & Break Analysis")
     with st.sidebar:
-        pre_mode = st.radio("SLA Depth", ["Only SLA", "Both SLA and Break Reports"])
+        pre_mode = st.radio("Report Depth", ["Only SLA", "Both SLA and Break Reports"])
         st.divider()
-        acd_file = st.file_uploader("1. Upload ACD Call Details (SLA)", type="csv")
-        sess_file = st.file_uploader("2. Upload Session Details (Breaks)", type="csv") if pre_mode == "Both SLA and Break Reports" else None
+        acd_file = st.file_uploader("Upload ACD Call Details (SLA)", type="csv")
+        sess_file = st.file_uploader("Upload Session Details (Breaks)", type="csv") if pre_mode == "Both SLA and Break Reports" else None
 
     if acd_file:
         try:
@@ -146,22 +146,31 @@ elif app_mode == "Pre-Sales Break and SLA":
             acd['Hour'] = acd['Call Time'].dt.hour
             acd['Is_Ans'] = acd['Username'].notna() & (acd['Username'].astype(str).str.strip() != '')
 
-            now_h, today = datetime.now().hour, datetime.now().date()
-            acd_f = acd[~((acd['Date'] == today) & (acd['Hour'] >= now_h))]
+            # --- SMART COMPLETED HOURS LOGIC ---
+            # Instead of current time, use the max timestamp in the file to avoid timezone errors
+            max_time = acd['Call Time'].max()
+            max_date = max_time.date()
+            current_hour_in_file = max_time.hour
+            
+            # Filter: Exclude the very last hour if it's for today's date
+            acd_f = acd[~((acd['Date'] == max_date) & (acd['Hour'] >= current_hour_in_file))]
 
             if acd_f.empty:
-                st.warning("No completed hours to report yet for today.")
+                st.warning("All data in this file is from the current (ongoing) hour. No 'completed' hours found yet.")
             else:
-                # Hourly SLA
+                # SLA Hourly
                 h_sla = acd_f.groupby('Hour').agg(Rec=('Call ID', 'count'), Ans=('Is_Ans', 'sum')).reset_index()
                 h_sla['Miss'] = h_sla['Rec'] - h_sla['Ans']
                 h_sla['SLA %'] = h_sla.apply(lambda r: f"{(r['Ans']/r['Rec']*100):.2f}%" if r['Rec'] > 0 else "0.00%", axis=1)
                 h_sla['Interval'] = h_sla['Hour'].apply(lambda x: f"{x:02d}:00 - {x+1:02d}:00")
                 
-                t_h = pd.DataFrame([{'Interval': 'Grand Total', 'Rec': h_sla['Rec'].sum(), 'Ans': h_sla['Ans'].sum(), 'Miss': h_sla['Miss'].sum(), 'SLA %': f"{(h_sla['Ans'].sum()/h_sla['Rec'].sum()*100):.2f}%" if h_sla['Rec'].sum() > 0 else "0.00%"}])
+                # Grand Total calculation with zero-division protection
+                total_rec = h_sla['Rec'].sum()
+                total_ans = h_sla['Ans'].sum()
+                t_h = pd.DataFrame([{'Interval': 'Grand Total', 'Rec': total_rec, 'Ans': total_ans, 'Miss': total_rec - total_ans, 'SLA %': f"{(total_ans/total_rec*100):.2f}%" if total_rec > 0 else "0.00%"}])
                 h_sla_final = pd.concat([h_sla[['Interval', 'Rec', 'Ans', 'Miss', 'SLA %']], t_h], ignore_index=True)
 
-                # Daily SLA
+                # SLA Daily
                 d_sla = acd_f.groupby('Date').agg(Rec=('Call ID', 'count'), Ans=('Is_Ans', 'sum')).reset_index()
                 d_sla['Miss'] = d_sla['Rec'] - d_sla['Ans']
                 d_sla['SLA %'] = d_sla.apply(lambda r: f"{(r['Ans']/r['Rec']*100):.2f}%" if r['Rec'] > 0 else "0.00%", axis=1)
@@ -171,6 +180,7 @@ elif app_mode == "Pre-Sales Break and SLA":
                     'Daily_SLA': {'df': d_sla, 'title': 'Daily SLA Summary', 'has_summary': False}
                 }
 
+                # --- BREAK PROCESSING ---
                 if pre_mode == "Both SLA and Break Reports" and sess_file:
                     sess_df = pd.read_csv(sess_file)
                     sess_df.columns = sess_df.columns.str.strip()
@@ -178,19 +188,17 @@ elif app_mode == "Pre-Sales Break and SLA":
                     sess_df['Hour'] = pd.to_datetime(sess_df['Login Time'], dayfirst=True, errors='coerce').dt.hour
                     sess_df['BS'] = sess_df['Break Duration'].apply(hms_to_sec)
                     
-                    # Daily Break
                     d_brk = sess_df.dropna(subset=['Break Reason']).pivot_table(index=['Date', 'Username'], columns='Break Reason', values='BS', aggfunc='sum', fill_value=0).reset_index()
                     for c in [x for x in d_brk.columns if x not in ['Date', 'Username']]: d_brk[c] = d_brk[c].apply(sec_to_hms)
                     
-                    # Hourly Break
                     h_brk = sess_df.dropna(subset=['Break Reason']).pivot_table(index=['Date', 'Hour'], columns='Break Reason', values='BS', aggfunc='sum', fill_value=0).reset_index()
                     h_brk['Interval'] = h_brk['Hour'].apply(lambda x: f"{x:02d}:00 - {x+1:02d}:00")
                     b_cols = [c for c in h_brk.columns if c not in ['Date', 'Hour', 'Interval']]
                     h_brk_final = h_brk[['Date', 'Interval'] + b_cols]
                     for c in b_cols: h_brk_final[c] = h_brk_final[c].apply(sec_to_hms)
                     
-                    sheets['Break_Daily'] = {'df': d_brk, 'title': 'Daily Agent Break Summary', 'has_summary': False}
-                    sheets['Break_Hourly'] = {'df': h_brk_final, 'title': 'Hourly Break Distribution', 'has_summary': False}
+                    sheets['Agent_Breaks_Daily'] = {'df': d_brk, 'title': 'Agent Break Summary (Day-wise)', 'has_summary': False}
+                    sheets['Breaks_Hourly'] = {'df': h_brk_final, 'title': 'Hourly Break Distribution', 'has_summary': False}
 
                 st.subheader("SLA Performance")
                 st.dataframe(h_sla_final, use_container_width=True)
