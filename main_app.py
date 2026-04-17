@@ -42,10 +42,11 @@ def sec_to_hms(seconds):
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-def to_excel_formatted_multi(sheets_dict, report_title):
+def to_excel_formatted_multi(sheets_dict):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
+        # STYLES: Arial 11, Yellow Background
         header_fmt = workbook.add_format({'bold': True, 'bg_color': '#FFFF00', 'font_name': 'Arial', 'font_size': 11, 'border': 1, 'align': 'center'})
         footer_fmt = workbook.add_format({'bold': True, 'bg_color': '#FFFF00', 'font_name': 'Arial', 'font_size': 11, 'border': 1, 'align': 'center'})
         data_fmt = workbook.add_format({'font_name': 'Arial', 'font_size': 11, 'border': 1, 'align': 'center'})
@@ -58,11 +59,37 @@ def to_excel_formatted_multi(sheets_dict, report_title):
             worksheet.write(0, 0, content['title'], title_fmt)
             worksheet.set_column(0, len(df.columns) - 1, 20)
 
+            # Apply Headers
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(2, col_num, value, header_fmt)
 
+            # Apply Data & Yellow Footer Logic
             last_row_idx = len(df) + 2
             for r_idx in range(len(df)):
                 curr_row = r_idx + 3
-                is_sum = content['has_summary'] and (curr_row == last_row_idx)
-                style = footer_fmt if
+                is_sum = content.get('has_summary', False) and (curr_row == last_row_idx)
+                style = footer_fmt if is_sum else data_fmt
+                for c_idx in range(len(df.columns)):
+                    worksheet.write(curr_row, c_idx, df.iloc[r_idx, c_idx], style)
+    return output.getvalue()
+
+# --- SIDEBAR NAVIGATION ---
+with st.sidebar:
+    st.image("https://thesleepcompany.in/cdn/shop/files/Logo_White_300x.png?v=1614330134", width=200)
+    st.header("Department Portal")
+    app_mode = st.radio("Choose App", ["Sales Performance", "Pre-Sales SLA & Breaks"])
+    st.divider()
+
+# ==========================================
+# 1. SALES TEAM SECTION
+# ==========================================
+if app_mode == "Sales Performance":
+    st.title("🚀 Sales Team Performance")
+    with st.sidebar:
+        p_file = st.file_uploader("1. Productivity Summary", type="csv")
+        s_file = st.file_uploader("2. Session Details", type="csv")
+        c_file = st.file_uploader("3. Custom Sales Report", type="csv")
+
+    if p_file and s_file and c_file:
+        try:
+            prod, sess, sales = pd.read_csv(p_file), pd.read_csv(s_file
