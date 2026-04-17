@@ -26,7 +26,7 @@ st.markdown(f"""
     """, unsafe_allow_html=True)
 
 # --- HELPERS ---
-def clean_phone(p):
+def clean_dstPhone(p):
     if pd.isna(p): return None
     digits = re.sub(r'\D', '', str(p))
     return digits[-10:] if len(digits) >= 10 else None
@@ -65,42 +65,42 @@ def process_revenue(orders_raw, calls_raw):
     orders['Order Date'] = orders['Order_DT_Obj'].dt.strftime('%d-%m-%Y')
     orders['Order Time Str'] = orders['Order_DT_Obj'].dt.strftime('%d-%m-%Y %H:%M:%S')
     
-    # Phone Logic
-    orders['B_Phone'] = orders['Billing Phone'].apply(clean_phone) if 'Billing Phone' in orders.columns else None
-    orders['S_Phone'] = orders['Shipping Phone'].apply(clean_phone) if 'Shipping Phone' in orders.columns else None
+    # dstPhone Logic
+    orders['B_dstPhone'] = orders['Billing dstPhone'].apply(clean_dstPhone) if 'Billing dstPhone' in orders.columns else None
+    orders['S_dstPhone'] = orders['Shipping dstPhone'].apply(clean_dstPhone) if 'Shipping dstPhone' in orders.columns else None
     
     expanded_rows = []
     for _, row in orders.iterrows():
         channel = "Store" if "retail_store" in str(row.get('Tags', '')).lower() else "Website"
-        phones = {p for p in [row['B_Phone'], row['S_Phone']] if p}
-        for ph in phones:
+        dstPhones = {p for p in [row['B_dstPhone'], row['S_dstPhone']] if p}
+        for ph in dstPhones:
             expanded_rows.append({
                 'Order ID': row['Name'], 'Order Value': float(row['Total']),
                 'Order Date': row['Order Date'], 'Order Time': row['Order_DT_Obj'],
-                'Order Time Str': row['Order Time Str'], 'Order Phone': ph, 'Channel': channel
+                'Order Time Str': row['Order Time Str'], 'Order dstPhone': ph, 'Channel': channel
             })
     orders_df = pd.DataFrame(expanded_rows)
 
     # 2. CLEAN CALLS
     calls = calls_raw.copy()
     # Find the right columns even if names vary slightly
-    call_time_col = [c for c in calls.columns if 'call time' in c.lower()][0]
-    phone_col = [c for c in calls.columns if 'phone' in c.lower()][0]
+    call_time_col = [c for c in calls.columns if 'Start Time' in c.lower()][0]
+    dstPhone_col = [c for c in calls.columns if 'dstPhone' in c.lower()][0]
     talk_col = [c for c in calls.columns if 'talk time' in c.lower()][0]
     user_col = [c for c in calls.columns if 'user id' in c.lower() or 'username' in c.lower()][0]
 
     calls['Call_DT_Obj'] = pd.to_datetime(calls[call_time_col], dayfirst=True, errors='coerce')
-    calls['Clean_Phone'] = calls[phone_col].apply(clean_phone)
+    calls['Clean_dstPhone'] = calls[dstPhone_col].apply(clean_dstPhone)
     calls['Talk_Sec'] = calls[talk_col].apply(hms_to_sec)
     
-    # Filter for connected calls with valid phone
-    calls = calls[(calls['Talk_Sec'] >= 1) & (calls['Clean_Phone'].notna())].copy()
+    # Filter for connected calls with valid dstPhone
+    calls = calls[(calls['Talk_Sec'] >= 1) & (calls['Clean_dstPhone'].notna())].copy()
 
     # 3. ATTRIBUTION
     final_data = []
     for _, order in orders_df.iterrows():
-        # Match calls for this phone that happened BEFORE order
-        match_calls = calls[(calls['Clean_Phone'] == order['Order Phone']) & 
+        # Match calls for this dstPhone that happened BEFORE order
+        match_calls = calls[(calls['Clean_dstPhone'] == order['Order dstPhone']) & 
                            (calls['Call_DT_Obj'] < order['Order Time'])]
         
         if match_calls.empty:
@@ -169,4 +169,4 @@ if order_file and call_file:
         st.download_button("📥 Download Final Report", data=output.getvalue(), file_name="Revenue_Attribution.xlsx")
     except Exception as e:
         st.error(f"Error: {e}")
-        st.info("Ensure your files have columns for 'Call Time', 'Phone', 'Talk Time', and 'User ID'.")
+        st.info("Ensure your files have columns for 'Start Time', 'dstPhone', 'Talk Time', and 'User ID'.")
