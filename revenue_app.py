@@ -5,9 +5,9 @@ import re
 from datetime import datetime
 
 # --- APP CONFIGURATION ---
-st.set_page_config(page_title="TSC | Revenue Attribution", layout="wide")
+st.set_page_config(page_title="TSC | Revenue Attribution Portal", layout="wide")
 
-# --- UI STYLING (Forced Branding) ---
+# --- UI STYLING ---
 brand_navy, brand_copper = "#102a51", "#c59d5f"
 st.markdown(f"""
     <style>
@@ -18,9 +18,8 @@ st.markdown(f"""
     </style>
     """, unsafe_allow_html=True)
 
-# --- UTILITIES ---
+# --- ROBUST UTILITIES ---
 def clean_phone_master(p):
-    """Converts scientific notation and floats to 10-digit strings."""
     if pd.isna(p) or str(p).strip() == "": return None
     try:
         if isinstance(p, float): s = format(p, '.0f')
@@ -29,8 +28,8 @@ def clean_phone_master(p):
         return digits[-10:] if len(digits) >= 10 else None
     except: return None
 
-def robust_time_to_sec(t):
-    if pd.isna(t) or t == 0: return 0
+def hms_to_sec(t):
+    if pd.isna(t) or t == '0' or t == 0: return 0
     s = str(t).strip().replace('.', ':')
     parts = s.split(':')
     try:
@@ -39,124 +38,119 @@ def robust_time_to_sec(t):
         return 0
     except: return 0
 
-def robust_date_parse(s):
-    if pd.isna(s): return pd.NaT
-    # Automatically handles YYYY-MM-DD, DD-MM-YYYY, and DD/MM/YYYY
-    return pd.to_datetime(s, dayfirst=True, errors='coerce')
-
 def sec_to_hms(s):
     h = int(s // 3600); m = int((s % 3600) // 60); s = int(s % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-# --- CORE LOGIC ---
-def process_attribution(o_raw, c_raw):
-    # Standardize Headers
-    o_raw.columns = o_raw.columns.str.strip()
-    c_raw.columns = c_raw.columns.str.strip()
+def robust_date_parse(s):
+    if pd.isna(s): return pd.NaT
+    # Tries multiple formats found in TSC reports
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M", "%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d"]:
+        try: return pd.to_datetime(s, format=fmt)
+        except: continue
+    return pd.to_datetime(s, dayfirst=True, errors='coerce')
 
-    # 1. PROCESS ORDERS
+# --- CORE LOGIC ---
+def run_revenue_automation(o_raw, call_files_list):
+    # 1. AGGREGATE ALL CALLS
+    calls_list = []
+    for f in call_files_list:
+        df = pd.read_csv(f)
+        df.columns = df.columns.str.strip()
+        
+        # Dynamic Header Detection
+        time_c = next((c for c in df.columns if 'time' in c.lower() and 'hangup' not in c.lower()), None)
+        phone_c = next((c for c in df.columns if 'phone' in c.lower() or 'dst' in c.lower()), None)
+        talk_c = next((c for c in df.columns if 'talk time' in c.lower()), None)
+        user_c = next((c for c in df.columns if 'user id' in c.lower() or 'username' in c.lower()), None)
+        
+        temp = df[[time_c, phone_c, talk_c, user_c]].copy()
+        temp.columns = ['Raw_Time', 'Raw_Phone', 'Raw_Talk', 'Agent']
+        calls_list.append(temp)
+    
+    all_calls = pd.concat(calls_list, ignore_index=True)
+    all_calls['DT'] = all_calls['Raw_Time'].apply(robust_date_parse)
+    all_calls['Phone_Clean'] = all_calls['Raw_Phone'].apply(clean_phone_master)
+    all_calls['Sec'] = all_calls['Raw_Talk'].apply(hms_to_sec)
+    all_calls = all_calls.dropna(subset=['DT', 'Phone_Clean'])
+
+    # 2. PROCESS ORDERS
+    o_raw.columns = o_raw.columns.str.strip()
     orders = o_raw.dropna(subset=['Total']).copy()
-    time_col = [c for c in orders.columns if 'created' in c.lower()][0]
+    time_col = next(c for c in orders.columns if 'created' in c.lower())
+    
     orders['DT_Clean'] = orders[time_col].astype(str).str.replace(r'\s\+\d{4}$', '', regex=True)
     orders['DT_Obj'] = pd.to_datetime(orders['DT_Clean'])
     
     orders['B_Ph'] = orders['Billing Phone'].apply(clean_phone_master)
     orders['S_Ph'] = orders['Shipping Phone'].apply(clean_phone_master)
     
-    o_list = []
+    final_output = []
     for _, row in orders.iterrows():
         tags = str(row.get('Tags', '')).lower()
         chan = "Store" if "retail" in tags and "store" in tags else "Website"
         phones = {p for p in [row['B_Ph'], row['S_Ph']] if p}
+        
         for ph in phones:
-            o_list.append({
-                'Order ID': row['Name'], 'Value': float(row['Total']),
-                'Order_Time': row['DT_Obj'], 'Order_Phone': ph, 'Channel': chan
-            })
-    o_df = pd.DataFrame(o_list)
+            # Attribution Match
+            matches = all_calls[(all_calls['Phone_Clean'] == ph) & (all_calls['DT'] < row['DT_Obj'])]
+            base = {
+                'Order ID': row['Name'], 'Order Value': float(row['Total']),
+                'Order Date': row['DT_Obj'].strftime('%d-%m-%Y'),
+                'Order Time': row['DT_Obj'].strftime('%d-%m-%Y %H:%M:%S'),
+                'Order Phone': ph, 'Channel': chan
+            }
 
-    # 2. PROCESS CALLS
-    def find_col(keys, df):
-        for k in keys:
-            for c in df.columns:
-                if k.lower() in c.lower(): return c
-        return None
+            if matches.empty:
+                final_output.append({**base, 'Agent': 'Organic', 'Attributed Revenue': row['Total'], 'Talk Time': '00:00:00'})
+                continue
 
-    c_time = find_col(['start time', 'call time'], c_raw)
-    c_phone = find_col(['dstphone', 'phone number', 'phone'], c_raw)
-    c_talk = find_col(['user talk time', 'talk time'], c_raw)
-    c_user = find_col(['user id', 'username'], c_raw)
+            agent_stats = matches.groupby('Agent')['Sec'].sum().reset_index()
 
-    calls = c_raw.copy()
-    calls['Call_DT'] = calls[c_time].apply(robust_date_parse)
-    calls['Clean_Ph'] = calls[c_phone].apply(clean_phone_master)
-    calls['Sec'] = calls[c_talk].apply(robust_time_to_sec)
-    calls = calls[(calls['Sec'] >= 1) & (calls['Clean_Ph'].notna())]
-
-    # 3. MATCHING
-    results = []
-    for _, order in o_df.iterrows():
-        matches = calls[(calls['Clean_Ph'] == order['Order_Phone']) & (calls['Call_DT'] < order['Order_Time'])]
-        
-        base_row = {
-            'Order ID': order['Order ID'], 'Order Value': order['Value'],
-            'Order Date': order['Order_Time'].strftime('%d-%m-%Y'),
-            'Order Time': order['Order_Time'].strftime('%d-%m-%Y %H:%M:%S'),
-            'Order Phone': order['Order_Phone'], 'Channel': order['Channel']
-        }
-
-        if matches.empty:
-            results.append({**base_row, 'Agent': 'Organic', 'Attributed Revenue': order['Value'], 'Talk Time': '00:00:00'})
-            continue
-
-        agent_sums = matches.groupby(c_user)['Sec'].sum().reset_index()
-
-        # Rule B: >= 100k (Proportional split, 3min/180s threshold)
-        if order['Value'] >= 100000:
-            qual = agent_sums[agent_sums['Sec'] >= 180]
-            if qual.empty:
-                results.append({**base_row, 'Agent': 'Organic', 'Attributed Revenue': order['Value'], 'Talk Time': '00:00:00'})
+            if row['Total'] >= 100000:
+                qual = agent_stats[agent_stats['Sec'] >= 180]
+                if qual.empty:
+                    final_output.append({**base, 'Agent': 'Organic', 'Attributed Revenue': row['Total'], 'Talk Time': '00:00:00'})
+                else:
+                    total_s = qual['Sec'].sum()
+                    for _, ag in qual.iterrows():
+                        final_output.append({**base, 'Agent': ag['Agent'], 'Attributed Revenue': round(row['Total']*(ag['Sec']/total_s),2), 'Talk Time': sec_to_hms(ag['Sec'])})
             else:
-                total_sec = qual['Sec'].sum()
-                for _, ag in qual.iterrows():
-                    results.append({**base_row, 'Agent': ag[c_user], 'Attributed Revenue': round(order['Value']*(ag['Sec']/total_sec), 2), 'Talk Time': sec_to_hms(ag['Sec'])})
-        
-        # Rule A: < 100k (Duplicate credit, 1min/60s threshold)
-        else:
-            qual = agent_sums[agent_sums['Sec'] >= 60]
-            if qual.empty:
-                results.append({**base_row, 'Agent': 'Organic', 'Attributed Revenue': order['Value'], 'Talk Time': '00:00:00'})
-            else:
-                for _, ag in qual.iterrows():
-                    results.append({**base_row, 'Agent': ag[c_user], 'Attributed Revenue': order['Value'], 'Talk Time': sec_to_hms(ag['Sec'])})
+                qual = agent_stats[agent_stats['Sec'] >= 60]
+                if qual.empty:
+                    final_output.append({**base, 'Agent': 'Organic', 'Attributed Revenue': row['Total'], 'Talk Time': '00:00:00'})
+                else:
+                    for _, ag in qual.iterrows():
+                        final_output.append({**base, 'Agent': ag['Agent'], 'Attributed Revenue': row['Total'], 'Talk Time': sec_to_hms(ag['Sec'])})
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(final_output)
 
 # --- UI ---
-st.title("💰 Revenue Attribution Hub")
+st.title("💰 TSC Revenue Attribution Portal")
+st.markdown("Automating revenue from Jan onwards with specific talk-time thresholds.")
+
 with st.sidebar:
-    st.header("Step 1: Data Upload")
+    st.header("Upload Files")
     o_file = st.file_uploader("1. Shopify Orders Raw", type="csv")
-    c_file = st.file_uploader("2. Call Data (Daily or Historical)", type="csv")
+    c_files = st.file_uploader("2. Call Data (Upload ALL files together)", type="csv", accept_multiple_files=True)
 
-if o_file and c_file:
+if o_file and c_files:
     try:
-        o_raw, c_raw = pd.read_csv(o_file), pd.read_csv(c_file)
-        with st.spinner("Analyzing Revenue..."):
-            final_df = process_attribution(o_raw, c_raw)
+        o_raw = pd.read_csv(o_file)
+        with st.spinner("Standardizing and Attributing Revenue..."):
+            res = run_revenue_automation(o_raw, c_files)
         
-        st.success(f"Analysis Complete! Found {len(final_df[final_df['Agent'] != 'Organic'])} Attributed Sales.")
-        st.dataframe(final_df, use_container_width=True)
+        st.success(f"Processed {len(res)} attribution records.")
+        st.dataframe(res, use_container_width=True)
 
-        # Excel Generation
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            final_df.to_excel(writer, sheet_name='Revenue', index=False, startrow=2)
+            res.to_excel(writer, sheet_name='Revenue', index=False, startrow=2)
             workbook, worksheet = writer.book, writer.sheets['Revenue']
             header_fmt = workbook.add_format({'bold': True, 'bg_color': '#FFFF00', 'font_name': 'Arial', 'font_size': 11, 'border': 1, 'align': 'center'})
-            for col_num, value in enumerate(final_df.columns.values):
+            for col_num, value in enumerate(res.columns.values):
                 worksheet.write(2, col_num, value, header_fmt)
-            worksheet.set_column(0, len(final_df.columns)-1, 20)
+            worksheet.set_column(0, len(res.columns)-1, 22)
             
-        st.download_button("📥 Download Revenue Report", data=output.getvalue(), file_name="Revenue_Attribution_Final.xlsx")
+        st.download_button("📥 Download Final Revenue Report", data=output.getvalue(), file_name="Revenue_Attribution_Final.xlsx")
     except Exception as e: st.error(f"Error: {e}")
