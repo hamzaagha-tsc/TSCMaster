@@ -26,7 +26,7 @@ st.markdown(f"""
     """, unsafe_allow_html=True)
 
 # --- HELPERS ---
-def clean_dstPhone(p):
+def clean_phone(p):
     if pd.isna(p): return None
     digits = re.sub(r'\D', '', str(p))
     return digits[-10:] if len(digits) >= 10 else None
@@ -34,14 +34,10 @@ def clean_dstPhone(p):
 def hms_to_sec(t):
     if pd.isna(t) or t == '0' or t == 0: return 0
     try:
-        t_str = str(t).strip()
-        # Handle formats like 00:02:30 or 00:02.5
-        t_str = t_str.replace('.', ':') 
+        t_str = str(t).strip().replace('.', ':') 
         parts = t_str.split(':')
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-        elif len(parts) == 2:
-            return int(parts[0]) * 60 + int(parts[1])
+        if len(parts) == 3: return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        if len(parts) == 2: return int(parts[0]) * 60 + int(parts[1])
         return 0
     except: return 0
 
@@ -51,77 +47,78 @@ def sec_to_hms(s):
 
 # --- CORE LOGIC ---
 def process_revenue(orders_raw, calls_raw):
-    # Standardize Headers
     orders_raw.columns = orders_raw.columns.str.strip()
     calls_raw.columns = calls_raw.columns.str.strip()
 
     # 1. CLEAN ORDERS
     orders = orders_raw.dropna(subset=['Total']).copy()
-    # Find the right time column (Created at)
     time_col = [c for c in orders.columns if 'created' in c.lower()][0]
     
-    orders[time_col] = orders[time_col].str.replace(r'\s\+\d{4}$', '', regex=True)
+    # Strip timezone automatically
+    orders[time_col] = orders[time_col].astype(str).str.replace(r'\s\+\d{4}$', '', regex=True)
     orders['Order_DT_Obj'] = pd.to_datetime(orders[time_col])
     orders['Order Date'] = orders['Order_DT_Obj'].dt.strftime('%d-%m-%Y')
     orders['Order Time Str'] = orders['Order_DT_Obj'].dt.strftime('%d-%m-%Y %H:%M:%S')
     
-    # dstPhone Logic
-    orders['B_dstPhone'] = orders['Billing dstPhone'].apply(clean_dstPhone) if 'Billing dstPhone' in orders.columns else None
-    orders['S_dstPhone'] = orders['Shipping dstPhone'].apply(clean_dstPhone) if 'Shipping dstPhone' in orders.columns else None
+    # Phone Logic (10 digits)
+    orders['B_Phone'] = orders['Billing Phone'].apply(clean_phone) if 'Billing Phone' in orders.columns else None
+    orders['S_Phone'] = orders['Shipping Phone'].apply(clean_phone) if 'Shipping Phone' in orders.columns else None
     
     expanded_rows = []
     for _, row in orders.iterrows():
         channel = "Store" if "retail_store" in str(row.get('Tags', '')).lower() else "Website"
-        dstPhones = {p for p in [row['B_dstPhone'], row['S_dstPhone']] if p}
-        for ph in dstPhones:
+        phones = {p for p in [row['B_Phone'], row['S_Phone']] if p}
+        for ph in phones:
             expanded_rows.append({
                 'Order ID': row['Name'], 'Order Value': float(row['Total']),
                 'Order Date': row['Order Date'], 'Order Time': row['Order_DT_Obj'],
-                'Order Time Str': row['Order Time Str'], 'Order dstPhone': ph, 'Channel': channel
+                'Order Time Str': row['Order Time Str'], 'Order Phone': ph, 'Channel': channel
             })
     orders_df = pd.DataFrame(expanded_rows)
 
-    # 2. CLEAN CALLS
-    calls = calls_raw.copy()
-    # Find the right columns even if names vary slightly
-    call_time_col = [c for c in calls.columns if 'Start Time' in c.lower()][0]
-    dstPhone_col = [c for c in calls.columns if 'dstPhone' in c.lower()][0]
-    talk_col = [c for c in calls.columns if 'talk time' in c.lower()][0]
-    user_col = [c for c in calls.columns if 'user id' in c.lower() or 'username' in c.lower()][0]
+    # 2. CLEAN CALLS (Smart Column Detection)
+    def find_col(possible_names, df):
+        for name in possible_names:
+            for col in df.columns:
+                if name.lower() in col.lower(): return col
+        return None
 
+    call_time_col = find_col(['call time', 'start time'], calls_raw)
+    phone_col = find_col(['phone', 'dstphone'], calls_raw)
+    talk_col = find_col(['user talk time', 'talk time'], calls_raw)
+    user_col = find_col(['user id', 'username'], calls_raw)
+
+    if not all([call_time_col, phone_col, talk_col, user_col]):
+        missing = [n for n, c in zip(['Time', 'Phone', 'Talk', 'User'], [call_time_col, phone_col, talk_col, user_col]) if not c]
+        raise ValueError(f"Missing columns: {', '.join(missing)}")
+
+    calls = calls_raw.copy()
     calls['Call_DT_Obj'] = pd.to_datetime(calls[call_time_col], dayfirst=True, errors='coerce')
-    calls['Clean_dstPhone'] = calls[dstPhone_col].apply(clean_dstPhone)
+    calls['Clean_Phone'] = calls[phone_col].apply(clean_phone)
     calls['Talk_Sec'] = calls[talk_col].apply(hms_to_sec)
-    
-    # Filter for connected calls with valid dstPhone
-    calls = calls[(calls['Talk_Sec'] >= 1) & (calls['Clean_dstPhone'].notna())].copy()
+    calls = calls[(calls['Talk_Sec'] >= 1) & (calls['Clean_Phone'].notna())].copy()
 
     # 3. ATTRIBUTION
     final_data = []
     for _, order in orders_df.iterrows():
-        # Match calls for this dstPhone that happened BEFORE order
-        match_calls = calls[(calls['Clean_dstPhone'] == order['Order dstPhone']) & 
-                           (calls['Call_DT_Obj'] < order['Order Time'])]
+        # Match calls BEFORE order time
+        match_calls = calls[(calls['Clean_Phone'] == order['Order Phone']) & (calls['Call_DT_Obj'] < order['Order Time'])]
         
         if match_calls.empty:
             final_data.append({**order, 'Agent': 'Organic', 'Attributed Revenue': order['Order Value'], 'Total Talk Time': '00:00:00'})
             continue
 
-        # Aggregate Talk Time per Agent
         agent_stats = match_calls.groupby(user_col)['Talk_Sec'].sum().reset_index()
         
-        # Scenario B: >= 100,000 (Split logic, 3min/180s criteria)
         if order['Order Value'] >= 100000:
             qualified = agent_stats[agent_stats['Talk_Sec'] >= 180].copy()
             if qualified.empty:
                 final_data.append({**order, 'Agent': 'Organic', 'Attributed Revenue': order['Order Value'], 'Total Talk Time': '00:00:00'})
             else:
-                total_q_sec = qualified['Talk_Sec'].sum()
+                total_q = qualified['Talk_Sec'].sum()
                 for _, ag in qualified.iterrows():
-                    share = ag['Talk_Sec'] / total_q_sec
+                    share = ag['Talk_Sec'] / total_q
                     final_data.append({**order, 'Agent': ag[user_col], 'Attributed Revenue': round(order['Order Value'] * share, 2), 'Total Talk Time': sec_to_hms(ag['Talk_Sec'])})
-        
-        # Scenario A: < 100,000 (Duplicate logic, 1min/60s criteria)
         else:
             qualified = agent_stats[agent_stats['Talk_Sec'] >= 60].copy()
             if qualified.empty:
@@ -134,7 +131,6 @@ def process_revenue(orders_raw, calls_raw):
 
 # --- APP UI ---
 st.title("💰 Revenue Attribution Automation")
-
 with st.sidebar:
     st.header("Upload Files")
     order_file = st.file_uploader("1. Shopify Orders Raw", type="csv")
@@ -142,31 +138,19 @@ with st.sidebar:
 
 if order_file and call_file:
     try:
-        o_raw = pd.read_csv(order_file)
-        c_raw = pd.read_csv(call_file)
-        
-        with st.spinner("Calculating Attribution..."):
-            result_df = process_revenue(o_raw, c_raw)
-            # Cleanup for display
-            display_df = result_df.drop(columns=['Order Time']).rename(columns={'Order Time Str': 'Order Time'})
-            
-        st.success("Analysis Complete!")
+        o_raw, c_raw = pd.read_csv(order_file), pd.read_csv(call_file)
+        result_df = process_revenue(o_raw, c_raw)
+        display_df = result_df.drop(columns=['Order Time']).rename(columns={'Order Time Str': 'Order Time'})
+        st.success("Attribution Complete!")
         st.dataframe(display_df, use_container_width=True)
 
-        # Excel Export
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             display_df.to_excel(writer, sheet_name='Attribution', index=False, startrow=2)
-            workbook = writer.book
-            worksheet = writer.sheets['Attribution']
+            workbook, worksheet = writer.book, writer.sheets['Attribution']
             header_fmt = workbook.add_format({'bold': True, 'bg_color': '#FFFF00', 'font_name': 'Arial', 'font_size': 11, 'border': 1})
-            data_fmt = workbook.add_format({'font_name': 'Arial', 'font_size': 11, 'border': 1})
-            
             for col_num, value in enumerate(display_df.columns.values):
                 worksheet.write(2, col_num, value, header_fmt)
             worksheet.set_column(0, len(display_df.columns)-1, 22)
-            
-        st.download_button("📥 Download Final Report", data=output.getvalue(), file_name="Revenue_Attribution.xlsx")
-    except Exception as e:
-        st.error(f"Error: {e}")
-        st.info("Ensure your files have columns for 'Start Time', 'dstPhone', 'Talk Time', and 'User ID'.")
+        st.download_button("📥 Download Revenue Report", data=output.getvalue(), file_name="Revenue_Attribution.xlsx")
+    except Exception as e: st.error(f"Error: {e}")
