@@ -5,7 +5,7 @@ import io
 # --- APP CONFIGURATION ---
 st.set_page_config(
     page_title="TSC | Performance Portal", 
-    page_icon="https://thesleepcompany.in/cdn/shop/files/fav-icon_32x32.png", 
+    page_icon="https://thesleepcompany.in/cdn/shop/files/new_logo.webp?v=1706780127&width=600", 
     layout="wide"
 )
 
@@ -81,7 +81,7 @@ def to_excel_formatted(df, sheet_name, report_title, has_summary_row=True):
 # --- SIDEBAR NAVIGATION ---
 with st.sidebar:
     st.image("https://thesleepcompany.in/cdn/shop/files/Logo_White_300x.png?v=1614330134", width=200)
-    st.header("Department Portal")
+    st.header("Sales Department Portal")
     app_mode = st.radio("Choose App", ["Sales Performance", "Pre-Sales SLA"])
     st.divider()
 
