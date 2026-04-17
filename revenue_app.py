@@ -87,4 +87,86 @@ def process_revenue(orders_raw, calls_raw):
     call_time_col = [c for c in calls.columns if 'call time' in c.lower()][0]
     phone_col = [c for c in calls.columns if 'phone' in c.lower()][0]
     talk_col = [c for c in calls.columns if 'talk time' in c.lower()][0]
-    user_col = [c for c in calls.columns if 'user id' in c.lower
+    user_col = [c for c in calls.columns if 'user id' in c.lower() or 'username' in c.lower()][0]
+
+    calls['Call_DT_Obj'] = pd.to_datetime(calls[call_time_col], dayfirst=True, errors='coerce')
+    calls['Clean_Phone'] = calls[phone_col].apply(clean_phone)
+    calls['Talk_Sec'] = calls[talk_col].apply(hms_to_sec)
+    
+    # Filter for connected calls with valid phone
+    calls = calls[(calls['Talk_Sec'] >= 1) & (calls['Clean_Phone'].notna())].copy()
+
+    # 3. ATTRIBUTION
+    final_data = []
+    for _, order in orders_df.iterrows():
+        # Match calls for this phone that happened BEFORE order
+        match_calls = calls[(calls['Clean_Phone'] == order['Order Phone']) & 
+                           (calls['Call_DT_Obj'] < order['Order Time'])]
+        
+        if match_calls.empty:
+            final_data.append({**order, 'Agent': 'Organic', 'Attributed Revenue': order['Order Value'], 'Total Talk Time': '00:00:00'})
+            continue
+
+        # Aggregate Talk Time per Agent
+        agent_stats = match_calls.groupby(user_col)['Talk_Sec'].sum().reset_index()
+        
+        # Scenario B: >= 100,000 (Split logic, 3min/180s criteria)
+        if order['Order Value'] >= 100000:
+            qualified = agent_stats[agent_stats['Talk_Sec'] >= 180].copy()
+            if qualified.empty:
+                final_data.append({**order, 'Agent': 'Organic', 'Attributed Revenue': order['Order Value'], 'Total Talk Time': '00:00:00'})
+            else:
+                total_q_sec = qualified['Talk_Sec'].sum()
+                for _, ag in qualified.iterrows():
+                    share = ag['Talk_Sec'] / total_q_sec
+                    final_data.append({**order, 'Agent': ag[user_col], 'Attributed Revenue': round(order['Order Value'] * share, 2), 'Total Talk Time': sec_to_hms(ag['Talk_Sec'])})
+        
+        # Scenario A: < 100,000 (Duplicate logic, 1min/60s criteria)
+        else:
+            qualified = agent_stats[agent_stats['Talk_Sec'] >= 60].copy()
+            if qualified.empty:
+                final_data.append({**order, 'Agent': 'Organic', 'Attributed Revenue': order['Order Value'], 'Total Talk Time': '00:00:00'})
+            else:
+                for _, ag in qualified.iterrows():
+                    final_data.append({**order, 'Agent': ag[user_col], 'Attributed Revenue': order['Order Value'], 'Total Talk Time': sec_to_hms(ag['Talk_Sec'])})
+
+    return pd.DataFrame(final_data)
+
+# --- APP UI ---
+st.title("💰 Revenue Attribution Automation")
+
+with st.sidebar:
+    st.header("Upload Files")
+    order_file = st.file_uploader("1. Shopify Orders Raw", type="csv")
+    call_file = st.file_uploader("2. Call Attribution Data", type="csv")
+
+if order_file and call_file:
+    try:
+        o_raw = pd.read_csv(order_file)
+        c_raw = pd.read_csv(call_file)
+        
+        with st.spinner("Calculating Attribution..."):
+            result_df = process_revenue(o_raw, c_raw)
+            # Cleanup for display
+            display_df = result_df.drop(columns=['Order Time']).rename(columns={'Order Time Str': 'Order Time'})
+            
+        st.success("Analysis Complete!")
+        st.dataframe(display_df, use_container_width=True)
+
+        # Excel Export
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            display_df.to_excel(writer, sheet_name='Attribution', index=False, startrow=2)
+            workbook = writer.book
+            worksheet = writer.sheets['Attribution']
+            header_fmt = workbook.add_format({'bold': True, 'bg_color': '#FFFF00', 'font_name': 'Arial', 'font_size': 11, 'border': 1})
+            data_fmt = workbook.add_format({'font_name': 'Arial', 'font_size': 11, 'border': 1})
+            
+            for col_num, value in enumerate(display_df.columns.values):
+                worksheet.write(2, col_num, value, header_fmt)
+            worksheet.set_column(0, len(display_df.columns)-1, 22)
+            
+        st.download_button("📥 Download Final Report", data=output.getvalue(), file_name="Revenue_Attribution.xlsx")
+    except Exception as e:
+        st.error(f"Error: {e}")
+        st.info("Ensure your files have columns for 'Call Time', 'Phone', 'Talk Time', and 'User ID'.")
