@@ -10,34 +10,34 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- THE SLEEP COMPANY BRANDING (UI Fix for Light/Dark) ---
+# --- THE SLEEP COMPANY BRANDING (Aggressive CSS Fix for Light Mode) ---
 brand_navy = "#102a51"
 brand_copper = "#c59d5f"
 
 st.markdown(f"""
     <style>
-    /* Force Sidebar to Navy Blue */
+    /* 1. FORCE SIDEBAR BACKGROUND & TEXT */
     [data-testid="stSidebar"] {{
         background-color: {brand_navy} !important;
     }}
-    [data-testid="stSidebar"] * {{
+    /* Force all text inside sidebar to be white */
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p, 
+    [data-testid="stSidebar"] label, 
+    [data-testid="stSidebar"] .stRadio label,
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {{
         color: white !important;
     }}
-    /* Style Buttons */
+    
+    /* 2. STYLE BUTTONS */
     div.stButton > button:first-child {{
         background-color: {brand_copper};
         color: white;
         border-radius: 8px;
         border: none;
-        padding: 0.5rem 2rem;
         font-weight: bold;
     }}
-    /* Style DataFrames for better visibility */
-    .stDataFrame {{
-        border: 1px solid {brand_navy};
-        border-radius: 5px;
-    }}
-    /* Headers */
+    
+    /* 3. GENERAL STYLING */
     h1, h2, h3 {{
         color: {brand_navy};
         font-family: 'Arial';
@@ -99,10 +99,10 @@ with st.sidebar:
     st.divider()
 
 # ==========================================
-# 1. SALES TEAM SECTION
+# 1. SALES TEAM SECTION (Now with Break Details)
 # ==========================================
 if app_mode == "Sales Performance":
-    st.title("🚀 Sales Performance & Break Analysis")
+    st.title("🚀 Sales Detailed Performance")
     with st.sidebar:
         p_file = st.file_uploader("1. Productivity Summary", type="csv")
         s_file = st.file_uploader("2. Session Details", type="csv")
@@ -113,53 +113,44 @@ if app_mode == "Sales Performance":
             prod, sess, sales = pd.read_csv(p_file), pd.read_csv(s_file), pd.read_csv(c_file)
             for d in [prod, sess, sales]: d.columns = d.columns.str.strip()
             
+            # Dates
             prod['Date'] = pd.to_datetime(prod['Interval Start'], dayfirst=True, errors='coerce').dt.date
             sess['Date'] = pd.to_datetime(sess['Login Time'], dayfirst=True, errors='coerce').dt.date
             sales['Date'] = pd.to_datetime(sales['Start Time'], dayfirst=True, errors='coerce').dt.date
             
-            # --- Sales & Unique Call Logic ---
+            # Sales & Unique Calls
             sales['TS'] = sales['Talk Time'].apply(hms_to_sec)
             sales['IC'] = sales['TS'] >= 1
             sa = sales.groupby(['Date', 'User ID']).agg(T_OB=('call Id', 'count'), U_OB=('dstPhone', 'nunique')).reset_index()
             ca = sales[sales['IC']].groupby(['Date', 'User ID']).agg(C_OB=('call Id', 'count'), U_CC=('dstPhone', 'nunique')).reset_index()
             sf = pd.merge(sa, ca, on=['Date', 'User ID'], how='left').fillna(0)
 
-            # --- Detailed Break Logic (Reason-wise) ---
+            # --- DETAILED BREAKS FOR SALES ---
             sess['BS'] = sess['Break Duration'].apply(hms_to_sec)
             break_pivot = sess.dropna(subset=['Break Reason']).pivot_table(
                 index=['Date', 'User ID'], columns='Break Reason', values='BS', aggfunc='sum', fill_value=0
             ).reset_index()
 
-            # --- Productivity Logic ---
+            # Productivity
             map_cols = {'Total Staffed Duration': 'Staffed','Total Ready Duration': 'Ready','Total Break Duration': 'Total Breaks','Total Idle Time': 'Idle','Total Talk Time in Interval': 'Talk','Total ACW Duration in Interval': 'ACW'}
             for k, v in map_cols.items(): 
-                if k in prod.columns: prod[v+'_sec'] = prod[k].apply(hms_to_sec)
-                else: prod[v+'_sec'] = 0
+                prod[v+'_sec'] = prod[k].apply(hms_to_sec) if k in prod.columns else 0
 
             pf = prod.groupby(['Date', 'User ID', 'User Name']).agg({f"{n}_sec": "sum" for n in map_cols.values()}).reset_index()
-            
-            # --- MERGE ALL ---
             res = pd.merge(pf, sf, on=['Date', 'User ID'], how='left').fillna(0)
             res = pd.merge(res, break_pivot, on=['Date', 'User ID'], how='left').fillna(0)
 
-            # Convert seconds columns back to HMS
+            # Convert to HMS
             time_cols = [x for x in res.columns if x.endswith('_sec')]
             break_cols = [x for x in break_pivot.columns if x not in ['Date', 'User ID']]
             for c in time_cols + break_cols:
-                clean_name = c.replace('_sec', '')
-                res[clean_name] = res[c].apply(sec_to_hms)
+                res[c.replace('_sec','')] = res[c].apply(sec_to_hms)
             
-            # Filter and Order Columns
-            break_headers = [b for b in break_cols]
-            desired = ['Date', 'User Name', 'User ID', 'Staffed', 'Ready', 'Total Breaks'] + break_headers + ['Idle', 'Talk', 'ACW', 'T_OB', 'C_OB', 'U_OB', 'U_CC']
-            final_sales = res[[c for c in desired if c in res.columns]].copy()
+            final_order = ['Date', 'User Name', 'User ID', 'Staffed', 'Ready', 'Total Breaks'] + break_cols + ['Idle', 'Talk', 'ACW', 'T_OB', 'C_OB', 'U_OB', 'U_CC']
+            result = res[[c for c in final_order if c in res.columns]].copy()
             
-            # Add Grand Total
-            s_totals = pd.DataFrame([{'Date': 'Grand Total', 'User Name': '-', 'User ID': '-', 'T_OB': int(final_sales['T_OB'].sum()) if 'T_OB' in final_sales.columns else 0}])
-            # Note: For simple display, only adding few totals
-            
-            st.dataframe(final_sales, use_container_width=True)
-            xl = to_excel_formatted_multi({'Sales_Report': {'df': final_sales, 'title': 'Sales Detailed Performance', 'has_summary': False}})
+            st.dataframe(result, use_container_width=True)
+            xl = to_excel_formatted_multi({'Sales_Report': {'df': result, 'title': 'Sales Detailed Performance', 'has_summary': False}})
             st.download_button("📥 Download Detailed Sales Excel", data=xl, file_name="Sales_Detailed_Report.xlsx")
         except Exception as e: st.error(f"Error: {e}")
 
@@ -167,11 +158,12 @@ if app_mode == "Sales Performance":
 # 2. PRE-SALES SECTION
 # ==========================================
 elif app_mode == "Pre-Sales SLA & Breaks":
-    st.title("📞 Pre-Sales Hub")
+    st.title("📞 Pre-Sales Performance Hub")
     with st.sidebar:
-        pre_mode = st.radio("Depth", ["Only SLA", "Both SLA and Breaks"])
-        acd_file = st.file_uploader("1. ACD Call Details", type="csv")
-        sess_file = st.file_uploader("2. Session Details", type="csv") if "Both" in pre_mode else None
+        pre_mode = st.radio("Report Type", ["Only SLA", "Both SLA and Break Reports"])
+        st.divider()
+        acd_file = st.file_uploader("1. ACD Call Details (SLA)", type="csv")
+        sess_file = st.file_uploader("2. Session Details (Breaks)", type="csv") if "Both" in pre_mode else None
 
     if acd_file:
         try:
@@ -182,11 +174,11 @@ elif app_mode == "Pre-Sales SLA & Breaks":
             acd['Hour'] = acd['Call Time'].dt.hour
             acd['Is_Ans'] = acd['Username'].notna() & (acd['Username'].astype(str).str.strip() != '')
 
-            # Completed Hours Logic (Timezone Robust)
+            # Smart Filter: Completed Hours only
             max_t = acd['Call Time'].max()
             acd_f = acd[~((acd['Date'] == max_t.date()) & (acd['Hour'] >= max_t.hour))]
 
-            if acd_f.empty: st.warning("No completed hours found yet.")
+            if acd_f.empty: st.warning("All data is from the current hour. No completed hours found yet.")
             else:
                 h_sla = acd_f.groupby('Hour').agg(Rec=('Call ID', 'count'), Ans=('Is_Ans', 'sum')).reset_index()
                 h_sla['Miss'] = h_sla['Rec'] - h_sla['Ans']
@@ -211,5 +203,5 @@ elif app_mode == "Pre-Sales SLA & Breaks":
                 st.subheader("SLA Overview")
                 st.dataframe(h_final, use_container_width=True)
                 xl_data = to_excel_formatted_multi(sheets)
-                st.download_button("📥 Download Pre-Sales Excel", data=xl_data, file_name="Pre_Sales_Performance.xlsx")
+                st.download_button("📥 Download Pre-Sales Excel", data=xl_data, file_name="Pre_Sales_SLA_Break_Report.xlsx")
         except Exception as e: st.error(f"Error: {e}")
