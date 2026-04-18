@@ -83,21 +83,18 @@ def process_kra_logic(df):
     return report[['Agent Name', 'Unique Outbound Calls', 'Unique Connected Calls', 'Total Talk Time', 'Date', 'Total_Talk_Secs']], last_call_ts
 
 # --- UI SECTION ---
-st.title("📊 Daily KRA Performance Report")
-st.markdown("Simple automation for Unique Outbound, Connected Calls, and Talk Time per Agent.")
-
+st.title("KRA Reports - Test")
 with st.sidebar:
-    st.markdown("### 🏢 TSC Portal")
+    st.markdown("TSC Portal")
     st.divider()
     up_file = st.file_uploader("Upload Custom Sales Report (CSV)", type="csv")
-    st.info("The logic now strictly groups by date and unique phone numbers.")
 
 if up_file:
     try:
         raw_df = pd.read_csv(up_file)
         kra_out, ts_name = process_kra_logic(raw_df)
         
-        st.success(f"Report Generated! Sorting by highest Connected Calls.")
+        st.success(f"Report Generated!")
         # Display Preview
         st.dataframe(kra_out.drop(columns=['Total_Talk_Secs', 'Date']), use_container_width=True)
 
